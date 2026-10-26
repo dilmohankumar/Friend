@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.Situationship" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/splash_bg</item>
+    </style>
+    <style name="Theme.Situationship.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_flame</item>
+        <item name="postSplashScreenTheme">@style/Theme.Situationship</item>
+    </style>
+</resources>

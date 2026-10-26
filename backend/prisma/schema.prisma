@@ -1,0 +1,226 @@
+// Situationship data model (PostgreSQL).
+// Relationships: User -> Swipe -> Match -> Message / Call, plus Block, Report, DeviceToken.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  CONSENT_PENDING
+  IDENTITY_PENDING
+  PROFILE_INCOMPLETE
+  ACTIVE
+  SUSPENDED
+}
+
+enum KycStatus {
+  none
+  pending
+  verified
+  failed
+}
+
+enum Gender {
+  male
+  female
+}
+
+enum SwipeAction {
+  like
+  pass
+}
+
+enum CallKind {
+  audio
+  video
+}
+
+enum CallStatus {
+  ringing
+  accepted
+  rejected
+  missed
+  ended
+}
+
+model User {
+  id             String     @id @default(uuid()) @db.Uuid
+  phone          String     @unique
+  status         UserStatus @default(CONSENT_PENDING)
+  consentAt      DateTime?  @map("consent_at")
+  kycStatus      KycStatus  @default(none) @map("kyc_status")
+  kycRef         String?    @map("kyc_ref") // provider reference only, never an ID number
+  /// Provider-supplied one-way hash of the verified identity: one real person = one account. Never an ID number.
+  kycFingerprint String?    @unique @map("kyc_fingerprint")
+  ageEligible    Boolean    @default(false) @map("age_eligible")
+  name           String?
+  gender         Gender?
+  interestedIn   Gender?    @map("interested_in")
+  birthYear      Int?       @map("birth_year")
+  bio            String?
+  city           String?
+  photos         String[]   @default([]) // storage object keys
+  minAge         Int        @default(18) @map("min_age")
+  maxAge         Int        @default(60) @map("max_age")
+  isDemo         Boolean    @default(false) @map("is_demo")
+  lastSeen       DateTime?  @map("last_seen")
+  suspendedAt    DateTime?  @map("suspended_at")
+  suspendReason  String?    @map("suspend_reason")
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  refreshTokens RefreshToken[]
+  kycSessions   KycSession[]
+  swipesMade    Swipe[]        @relation("swiper")
+  swipesGot     Swipe[]        @relation("target")
+  matchesA      Match[]        @relation("userA")
+  matchesB      Match[]        @relation("userB")
+  messages      Message[]
+  blocksMade    Block[]        @relation("blocker")
+  blocksGot     Block[]        @relation("blocked")
+  devices       DeviceToken[]
+
+  @@index([status, gender, interestedIn])
+  // Discovery: ordered index scan so LIMIT 10 stops early (see migration 20261026000000)
+  @@index([gender, interestedIn, lastSeen(sort: Desc, nulls: Last), createdAt(sort: Desc)], map: "users_discover_idx")
+  @@map("users")
+}
+
+model Otp {
+  phone     String   @id
+  codeHash  String   @map("code_hash")
+  expiresAt DateTime @map("expires_at")
+  attempts  Int      @default(0)
+
+  @@index([expiresAt])
+  @@map("otps")
+}
+
+model RefreshToken {
+  tokenHash String    @id @map("token_hash")
+  userId    String    @map("user_id") @db.Uuid
+  /// All tokens descending from one login share a family; reuse of a consumed token revokes the whole family.
+  familyId  String    @default(dbgenerated("gen_random_uuid()")) @map("family_id") @db.Uuid
+  usedAt    DateTime? @map("used_at")
+  expiresAt DateTime  @map("expires_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model KycSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  status    String   @default("started")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("kyc_sessions")
+}
+
+model Swipe {
+  swiperId  String      @map("swiper_id") @db.Uuid
+  targetId  String      @map("target_id") @db.Uuid
+  action    SwipeAction
+  createdAt DateTime    @default(now()) @map("created_at")
+  swiper    User        @relation("swiper", fields: [swiperId], references: [id], onDelete: Cascade)
+  target    User        @relation("target", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@id([swiperId, targetId])
+  @@index([targetId, action])
+  @@map("swipes")
+}
+
+/// user_a_id < user_b_id is enforced by a CHECK constraint (see migration), so a pair can only match once.
+model Match {
+  id        String    @id @default(uuid()) @db.Uuid
+  userAId   String    @map("user_a_id") @db.Uuid
+  userBId   String    @map("user_b_id") @db.Uuid
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now()) @map("created_at")
+  userA     User      @relation("userA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User      @relation("userB", fields: [userBId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  calls     Call[]
+
+  @@unique([userAId, userBId])
+  @@index([userBId])
+  @@map("matches")
+}
+
+model Message {
+  id              String    @id @default(uuid()) @db.Uuid
+  matchId         String    @map("match_id") @db.Uuid
+  senderId        String    @map("sender_id") @db.Uuid
+  clientMessageId String    @map("client_message_id")
+  text            String
+  createdAt       DateTime  @default(now()) @map("created_at")
+  deliveredAt     DateTime? @map("delivered_at")
+  readAt          DateTime? @map("read_at")
+  match           Match     @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  sender          User      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, clientMessageId]) // idempotent retries
+  @@index([matchId, createdAt])
+  @@map("messages")
+}
+
+model Call {
+  id        String     @id @default(uuid()) @db.Uuid
+  matchId   String     @map("match_id") @db.Uuid
+  callerId  String     @map("caller_id") @db.Uuid
+  calleeId  String     @map("callee_id") @db.Uuid
+  kind      CallKind
+  status    CallStatus
+  startedAt DateTime   @default(now()) @map("started_at")
+  endedAt   DateTime?  @map("ended_at")
+  match     Match      @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@map("calls")
+}
+
+model Block {
+  blockerId String   @map("blocker_id") @db.Uuid
+  blockedId String   @map("blocked_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  blocker   User     @relation("blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked   User     @relation("blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("blocks")
+}
+
+model Report {
+  id         String    @id @default(uuid()) @db.Uuid
+  reporterId String    @map("reporter_id") @db.Uuid
+  reportedId String    @map("reported_id") @db.Uuid
+  reason     String
+  details    String?
+  status     String    @default("open") // open | dismissed | actioned
+  resolvedAt DateTime? @map("resolved_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([status, createdAt])
+  @@index([reportedId])
+  @@map("reports")
+}
+
+model DeviceToken {
+  token     String   @id
+  userId    String   @map("user_id") @db.Uuid
+  platform  String   @default("android")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("device_tokens")
+}
